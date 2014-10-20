@@ -18,7 +18,7 @@ server: 	server.o
 			${CC} ${CFLAGS} -o $@ server.o get_ifi_info_plus.o ${LIBS}	
 
 client: 	client.o
-			${CC} ${CFLAGS} -o $@ client.o ${LIBS}			
+			${CC} ${CFLAGS} -o $@ client.o get_ifi_info_plus.o ${LIBS}			
 
 clean:
 		rm -f ${PROGS} ${CLEANFILES}
