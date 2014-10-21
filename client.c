@@ -11,6 +11,8 @@
 #include "unpifiplus.h"
 #include "shared.h"
 
+static struct sockaddr_in servaddr;
+
 #pragma mark - Main
 
 int checkIfLocal(char *serverIp, char *clientIp) {
@@ -79,7 +81,7 @@ int checkIfLocal(char *serverIp, char *clientIp) {
         }
     }
     
-    printf("Debug IPServer: %s\nIPClient: %s\nDebug values\nSee GetSockName below for real IPClient\nSee GetPeerName below for real IPserver\n\n", serverIp, clientIp);
+    printf("Debug IPServer: %s\nDebug IPClient: %s\nDebug values\nSee GetSockName below for real IPClient\nSee GetPeerName below for real IPserver\n\n", serverIp, clientIp);
     
     return found;
 }
@@ -112,8 +114,6 @@ int createSocket(int isLocal, char *ipClient, char *ipServer, int port) {
     inet_ntop(AF_INET, &addr.sin_addr, readableIp, MAXLINE);
     printf("GetSockName:\nIPClient: %s\nEphemeral Port: %d\n\n", readableIp, ntohs(addr.sin_port));
     
-    
-    struct sockaddr_in	servaddr;
     bzero(&servaddr, sizeof(servaddr));
     servaddr.sin_family      = AF_INET;
     servaddr.sin_port        = htons(port);
@@ -129,9 +129,24 @@ int createSocket(int isLocal, char *ipClient, char *ipServer, int port) {
     return listenfd;
 }
 
-void sendFileName(int socketFd, int isLocal, char *filename) {
+//sends the filename
+void sendFirstHandshake(int socketFd, int isLocal, char *filename) {
     int option = (isLocal == 1)? MSG_DONTROUTE : 0;
-    send(socketFd,filename,strlen(filename),0);
+    send(socketFd,filename,strlen(filename),option);
+  
+    char msg[MAXLINE];
+    struct sockaddr_in cliaddr;
+    socklen_t len = sizeof(cliaddr);
+    recvfrom(socketFd, msg, MAXLINE, 0, (SA*)&cliaddr, &len);
+    removeNewLine(msg);
+    printf("Client recieved second handshake - server port: %s\n", msg);
+    
+    //send the third ACK
+    int servPort = atoi(msg);
+    servaddr.sin_port        = htons(servPort);
+    connect(socketFd, (struct sockaddr *)&servaddr, sizeof(servaddr));
+    char *smsg = "ACK PortNum";
+    send(socketFd, smsg, strlen(smsg), option);
 }
 
 int main(int argc, char **argv) {
@@ -177,5 +192,5 @@ int main(int argc, char **argv) {
     
     int isLocal = checkIfLocal(serverIp, clientIp);
     int socketFd = createSocket(isLocal, clientIp, serverIp, port);
-    sendFileName(socketFd, isLocal, filename);
+    sendFirstHandshake(socketFd, isLocal, filename);
 }

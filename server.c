@@ -4,8 +4,10 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include "unpifiplus.h"
 #include "shared.h"
+#include "serverChild.h"
 
 #pragma mark - Main
 
@@ -62,29 +64,42 @@ SocketInfo* createListeningSockets(int port) {
     }
     free_ifi_info_plus(ifihead);
     
-    //use select to block and listen
-    fd_set lset;
-    FD_ZERO(&lset);
-    
-    SocketInfo *si = socketInfo;
-    for(si = socketInfo; si != NULL; si = si->next) {
-        printf("Select set on %d\n", si->sockFd);
-        FD_SET(si->sockFd,&lset);
-    }
-    
-    //use select to monitor
-    int sel = 0;
-    sel = Select(FD_SETSIZE, &lset, NULL, NULL, NULL);
-    printf("select returned: %d\n", sel);
-    if(sel > 0) {
+    for(;;) {
+        //use select to block and listen
+        fd_set lset;
+        FD_ZERO(&lset);
+        
+        SocketInfo *si = socketInfo;
         for(si = socketInfo; si != NULL; si = si->next) {
-            if(FD_ISSET(si->sockFd, &lset)) {
-                printf("Waiting on mesg from client\n");
-                char mesg[MAXLINE];
-                struct sockaddr_in cliaddr;
-                socklen_t len = sizeof(cliaddr);
-                Recvfrom(si->sockFd, mesg, MAXLINE, 0, (SA*)&cliaddr, &len);
-                printf("mesg recieved: %s\nFrom: %s\n", mesg, si->readableIp);
+            FD_SET(si->sockFd,&lset);
+        }
+        
+        //use select to monitor
+        int sel = 0;
+        printf("\nentered select\n\n");
+        sel = Select(FD_SETSIZE, &lset, NULL, NULL, NULL);
+        printf("select returned: %d\n", sel);
+        if(sel > 0) {
+            for(si = socketInfo; si != NULL; si = si->next) {
+                if(FD_ISSET(si->sockFd, &lset)) {
+                    char mesg[MAXLINE];
+                    struct sockaddr_in cliaddr;
+                    socklen_t clilen = sizeof(cliaddr);
+                    recvfrom(si->sockFd, mesg, MAXLINE, 0, (SA*)&cliaddr, &clilen);
+                    int cliPort = ntohs(cliaddr.sin_port);
+                    char cliIp[MAXLINE];
+                    inet_ntop(AF_INET, &cliaddr.sin_addr, cliIp, MAXLINE);
+                    removeNewLine(cliIp);
+                    printf("msg recieved: %s\nOn: %s\nClient Port: %d\nClient IP: %s\n\n", mesg, si->readableIp, cliPort, cliIp);
+                    
+                    int childpid;
+                    if((childpid = Fork()) == 0) {
+                        //child - call some other .c method
+                        handleClient(cliIp, cliPort, si, socketInfo, cliaddr, clilen);
+                        printf("Child exiting\n");
+                        exit(0);
+                    }
+                }
             }
         }
     }
