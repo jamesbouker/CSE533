@@ -16,11 +16,11 @@ static struct sockaddr_in servaddr;
 #pragma mark - Main
 
 int checkIfLocal(char *serverIp, char *clientIp) {
-    struct ifi_info	*ifi, *ifihead;
-    struct sockaddr	*sa;
+    struct ifi_info *ifi, *ifihead;
+    struct sockaddr *sa;
     SocketInfo *socketInfo = NULL;
-    u_char		*ptr;
-    int		i, family, doaliases;
+    u_char      *ptr;
+    int     i, family, doaliases;
     family = AF_INET;
     doaliases = 1;
     const int on = 1;
@@ -102,7 +102,7 @@ int createSocket(int isLocal, char *ipClient, char *ipServer, int port) {
     }
     printf("\n");
     
-    struct sockaddr_in	cliaddr;
+    struct sockaddr_in  cliaddr;
     bzero(&cliaddr, sizeof(cliaddr));
     cliaddr.sin_family      = AF_INET;
     cliaddr.sin_port        = htons(0);
@@ -130,7 +130,7 @@ int createSocket(int isLocal, char *ipClient, char *ipServer, int port) {
 }
 
 //sends the filename
-void sendFirstHandshake(int socketFd, int isLocal, char *filename) {
+void sendFirstHandshake(int socketFd, int isLocal, char *filename, int windowSize) {
     int option = (isLocal == 1)? MSG_DONTROUTE : 0;
     send(socketFd,filename,strlen(filename),option);
   
@@ -145,15 +145,60 @@ void sendFirstHandshake(int socketFd, int isLocal, char *filename) {
     int servPort = atoi(msg);
     servaddr.sin_port        = htons(servPort);
     connect(socketFd, (struct sockaddr *)&servaddr, sizeof(servaddr));
-    char *smsg = "ACK PortNum";
+    printf("sending thirdhandshake to server!! ACK\n");
+    char smsg[MAXLINE];
+    sprintf(smsg, "ThirdHandshake: %d", windowSize);
     send(socketFd, smsg, strlen(smsg), option);
+}
+
+void recieveFile(int socketFd, int windowSize, float dropProb, int isLocal) {
+    int option = (isLocal == 1)? MSG_DONTROUTE : 0;
+    Window *window = makeWindow(windowSize);
+    char rcvBuf[MAXLINE]; 
+    char sendingBuf[MAXLINE];
+    bzero(rcvBuf, sizeof(rcvBuf));
+    int nrecv;
+    char *eof = "EOFEOFEOFEOF";
+
+    int seqNum = 0;
+    while((nrecv = recv(socketFd, rcvBuf, MAXLINE, 0)) >= 0) {
+        printf("CHUNK RECEIVED: %s\n", rcvBuf);
+        bzero(sendingBuf, sizeof(sendingBuf));
+
+        //check if packet lost
+        if(((rand() % 100) / 100.0) > dropProb) {
+            insertPacket(window, rcvBuf, seqNum);
+            int recvSize = availWindoSize(window);
+            int nextAck = window->ptr->seqNum;
+            sprintf(sendingBuf, "ACK:%d WinSize:%d", nextAck, recvSize);
+            printf("Sending to server: %s\n", sendingBuf);
+            send(socketFd,sendingBuf,strlen(sendingBuf),option);
+
+            if(strcmp(eof, rcvBuf) == 0) {
+                printf("Recieved EOF from server\n");
+                break;
+            }
+        }
+        else {
+            printf("packet dropped: %d\n", seqNum);    
+        }
+        seqNum++;
+
+        bzero(rcvBuf, sizeof(rcvBuf));
+    }
+
+    printf("Exiting the while loop\n");
+
+    if(nrecv < 0) {
+        perror("error receiving across network!\n");
+        exit(1);
+    }
 }
 
 int main(int argc, char **argv) {
     char line[MAXLINE];
     char serverIp[MAXLINE], clientIp[MAXLINE];
     char filename[MAXLINE];
-    
     
     printf("Client.in:\n");
     int fd = open("client.in", O_RDONLY);
@@ -178,6 +223,7 @@ int main(int argc, char **argv) {
     Readline(fd, line, MAXLINE);
     int seed = atoi(line);
     printf("seed: %d\n",seed);
+    srand(seed);
     
     Readline(fd, line, MAXLINE);
     float prob =  (float)strtod(line, NULL);
@@ -192,5 +238,8 @@ int main(int argc, char **argv) {
     
     int isLocal = checkIfLocal(serverIp, clientIp);
     int socketFd = createSocket(isLocal, clientIp, serverIp, port);
-    sendFirstHandshake(socketFd, isLocal, filename);
+
+    sendFirstHandshake(socketFd, isLocal, filename, windowSize);
+    
+    recieveFile(socketFd, windowSize, prob, isLocal);
 }

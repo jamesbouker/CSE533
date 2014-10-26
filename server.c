@@ -14,7 +14,7 @@
 extern struct ifi_info *get_ifi_info_plus(int family, int doaliases);
 extern        void      free_ifi_info_plus(struct ifi_info *ifihead);
 
-SocketInfo* createListeningSockets(int port) {
+SocketInfo* createListeningSockets(int port, int windowSize) {
     struct ifi_info	*ifi, *ifihead;
     struct sockaddr	*sa;
     SocketInfo *socketInfo = NULL;
@@ -26,6 +26,8 @@ SocketInfo* createListeningSockets(int port) {
     doaliases = 1;
     
     const int on = 1;
+    
+    char* filename;
     
     for (ifihead = ifi = get_ifi_info_plus(family, doaliases); ifi != NULL; ifi = ifi->ifi_next) {
         char ip[MAXLINE];
@@ -92,10 +94,13 @@ SocketInfo* createListeningSockets(int port) {
                     removeNewLine(cliIp);
                     printf("msg recieved: %s\nOn: %s\nClient Port: %d\nClient IP: %s\n\n", mesg, si->readableIp, cliPort, cliIp);
                     
+                    filename = mesg;
+                    printf("SERVER HAS THE FILENAME!!: %s\n", filename);
+                    
                     int childpid;
                     if((childpid = Fork()) == 0) {
                         //child - call some other .c method
-                        handleClient(cliIp, cliPort, si, socketInfo, cliaddr, clilen);
+                        handleClient(cliIp, cliPort, si, socketInfo, cliaddr, clilen, filename, windowSize);
                         printf("Child exiting\n");
                         exit(0);
                     }
@@ -122,7 +127,7 @@ int main(int argc, char **argv) {
     printf("windowSize: %d\n\n",windowSize);
     
     
-    createListeningSockets(port);
+    createListeningSockets(port, windowSize);
     
     close(fd);
     
