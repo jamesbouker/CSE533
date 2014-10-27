@@ -1,6 +1,10 @@
 #ifndef __shared_h
 #define __shared_h
 
+#define MAX_HEADER      100
+#define MAX_CONTENT     412
+#define MAX_PACKET      (MAX_HEADER + MAX_CONTENT)
+
 void removeNewLine(char *str) {
     int len = strlen(str);
     int i;
@@ -70,6 +74,7 @@ int availWindoSize(Window *window) {
     WindowCell *ptr = window->ptr;
     int index = indexOfCell(window, ptr);
     int windowSize = 0;
+    printf("ptr seqNum: %d\n", firstSeqNum);
 
     //for a full buffer
     if(ptr->arrived) 
@@ -101,6 +106,13 @@ void readFromWindow(Window *window, int numCells) {
             ptr->seqNum = newSeqNum;
             bzero(ptr->data, sizeof(ptr->data));
             newSeqNum++;
+
+            //handle full buffer - new slot avail so move ptr
+            if(window->ptr->arrived) {
+                if(ptr->seqNum == window->ptr->seqNum+1) {
+                    window->ptr = ptr;
+                }
+            }
         }
         else
             break;
@@ -111,7 +123,7 @@ void readFromWindow(Window *window, int numCells) {
 }
 
 //used by server
-void printRcvWindow(Window *window) {
+void printServerWindow(Window *window) {
     int size = numberOpenSendCells(window);
     printf("Window Stats:\nSize: %d/%d free\n", size, window->numberCells);
     int i;
@@ -241,7 +253,7 @@ int numberOpenSendCells(Window *window) {
 }
 
 //used by client
-void insertPacket(Window *window, char *msg, int seqNum) {
+int insertPacket(Window *window, char *msg, int seqNum) {
     //give data to cell
     printf("Insert Packet: %s\n", msg);
 
@@ -255,11 +267,15 @@ void insertPacket(Window *window, char *msg, int seqNum) {
     WindowCell *ptr = window->ptr;
     WindowCell *lastPtr = ptr;
     int index = indexOfCell(window, ptr);
+    int full = 0;
 
-    if(seqNum != firstSeqNum) {
+    //if full before insert: this cannot happen, we check before calling
+    //consumer read will move the ptr to the appropriate cell
+
+    if(seqNum > firstSeqNum) {
         printf("\nPacket arrived for seqNum: %d\nStill expecting seqNum: %d\n\n", seqNum, lastPtr->seqNum);
     }
-    else {
+    else if(seqNum == firstSeqNum) {
         for(;;) {
             index++;
             index = index % window->numberCells;
@@ -273,11 +289,16 @@ void insertPacket(Window *window, char *msg, int seqNum) {
                 break;
         }
 
-        printf("\nPacket arrived for seqNum: %d\nNext expected seqNum: %d\n\n", seqNum, lastPtr->seqNum);
+        //full after insert?
+        if(lastPtr->seqNum == seqNum)
+            full = 1;
+
+        printf("\nPacket arrived for seqNum: %d\nNext expected seqNum: %d\n\n", seqNum, lastPtr->seqNum + full);
         window->ptr = lastPtr;
     }
 
     printWindow(window);
+    return window->ptr->seqNum + full;
 }
 
 #pragma mark - Socket Info

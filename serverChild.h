@@ -101,38 +101,47 @@ int waitForThirdHandshake() {
     return cliWinSize;
 }
 
-void sendWindowCell(WindowCell *cell, int options) {
+void sendWindowCell(WindowCell *cell, int options, int isEof) {
+    char toSend[MAX_PACKET];
+    bzero(toSend, sizeof(toSend));
+
     cell->inFlight = 1;
-    printf("Sending Cell: %d\nData: %s\n",cell->seqNum, cell->data);
-    send(connFd,cell->data,strlen(cell->data),options);
+    snprintf(toSend, MAX_PACKET,"Header: SeqNum: %d EOF: %d Probe: %d Content: %s", cell->seqNum, isEof, 0, cell->data);
+    
+    printf("Sending data: %s\n", toSend);
+    send(connFd,toSend,strlen(toSend),options);
 }
 
 int sendMoreData(Window *window, int fd, int options, int cliWinSize) {
-    printf("in sendMoreData\n");
-    char buff[MAXLINE];
+    char buff[MAX_CONTENT+1];
     bzero(buff, sizeof(buff));
     int nread;
     int hasData = 1;
     int numberPacketsToSend = min(cliWinSize, numberOpenSendCells(window));
     int i;
-    printf("numberPacketsToSend: %d\n", numberPacketsToSend);
+
+    if(numberPacketsToSend > 0)
+        printf("About to send %d packets to client\n", numberPacketsToSend);
+    else {
+        printf("Client Window is full, we need to probe later\n");
+    }
 
     for(i=0; i<numberPacketsToSend; i++) {
         bzero(buff, sizeof(buff));
-        nread = read(fd, buff, MAXLINE);
+        nread = read(fd, buff, MAX_CONTENT);
         if(nread > 0) {
             //we read buff
             printf("\n\nREAD: %d\n", i);
             //printf("buff: %s\n", buff);
             WindowCell *cell = addToWindow(window, buff);
-            sendWindowCell(cell, options);
+            sendWindowCell(cell, options, 0);
         }
         else if(nread == 0) {
             //we read EOF
             printf("\n\nREAD EOF: %d\n", i);
             //printf("buff: %s\n", buff);
             WindowCell *cell = addToWindow(window, "EOFEOFEOFEOF");
-            sendWindowCell(cell, options);
+            sendWindowCell(cell, options, 1);
             hasData = 0;
             break;
         }
@@ -152,58 +161,83 @@ int sendMoreData(Window *window, int fd, int options, int cliWinSize) {
     return hasData;
 }
 
+void sendProbe(int options) {
+    char toSend[MAX_PACKET];
+    bzero(toSend, sizeof(toSend));
+    snprintf(toSend, MAX_PACKET,"Header: SeqNum: %d EOF: %d Probe: %d Content: %s", 0, 0, 1, "");
+    
+    printf("Sending Probe: %s\n", toSend);
+    send(connFd,toSend,strlen(toSend),options);
+}
+
 void handleDataTransfer(Window * window, int  fd, int options, int hasData) {
     int lastACK = -1;
     int ackCount;
-    char rcvBuf[MAXLINE];
+    char rcvBuf[MAX_PACKET];
     int ackNum;
     int cliWinSize;
     int numAcks;
 
     for(;;) {
-        if(recv(connFd, rcvBuf, MAXLINE, 0) >= 0) {
-            printf("Server recieved an %s\n", rcvBuf);
-            sscanf(rcvBuf, "ACK:%d WinSize:%d", &ackNum, &cliWinSize);
-            bzero(rcvBuf, sizeof(rcvBuf));
+        struct pollfd pollFD;
+        int res;
+        pollFD.fd = connFd;
+        pollFD.events = POLLIN;
+        res = poll(&pollFD, 1, 3 * 1000); //3 second timeout
 
-            if(lastACK < ackNum) {
-                lastACK = ackNum;
-                ackCount = 0;
-                printf("Now waiting on ACK: %d\n", lastACK+1);
-            }
-            else {
-                ackCount++;
-                printf("Still waiting on ACK: %d\n", lastACK+1);
-                if(ackCount >= 3) {
-                    printf("Recieved 3 other ACKS while waiting on ACK: %d\n", lastACK+1);
-                    printf("Time to resend!\n\n");
-                    //todo: call resendWindow()
-                    //keep the continue here!
-                    continue;
+        if (res == 0) {
+            // timeout
+            printf("\nTIMEOUT in recv: sending probe\n\n");
+            sendProbe(options);
+        }
+        else if (res != -1) {
+            if(recv(connFd, rcvBuf, MAX_PACKET, 0) >= 0) {
+                printf("Server recieved: %s\n", rcvBuf);
+                sscanf(rcvBuf, "Header: SeqNum: %d WinSize: %d", &ackNum, &cliWinSize);
+                bzero(rcvBuf, sizeof(rcvBuf));
+
+                if(lastACK < ackNum) {
+                    lastACK = ackNum;
+                    ackCount = 0;
+                    printf("Now waiting on ACK: %d\n", lastACK+1);
                 }
-            }
-
-            int oldestIndex = oldestCell(window);
-            WindowCell *cell = &window->cells[oldestIndex];
-            numAcks = ackNum - cell->seqNum;
-
-            if(numAcks > 0) {
-                windowRecieved(window, numAcks);
-                printRcvWindow(window);
-                if(hasData)
-                    hasData = sendMoreData(window, fd, options, cliWinSize);
                 else {
-                    //we have pushed all data to our window
-                    if(numberOfInFlightPackets(window) == 0) {
-                        //we are done
-                        break;
+                    ackCount++;
+                    printf("Still waiting on ACK: %d\n", lastACK+1);
+                    if(ackCount >= 3) {
+                        printf("Recieved 3 other ACKS while waiting on ACK: %d\n", lastACK+1);
+                        printf("Time to resend!\n\n");
+                        //todo: call resendWindow()
+                        //keep the continue here!
+                        continue;
                     }
                 }
-            }
 
+                int oldestIndex = oldestCell(window);
+                WindowCell *cell = &window->cells[oldestIndex];
+                numAcks = ackNum - cell->seqNum;
+                int numInFlight = numberOfInFlightPackets(window);
+
+                if(numAcks > 0) {
+                    windowRecieved(window, numAcks);
+                    printServerWindow(window);
+                    if(hasData)
+                        hasData = sendMoreData(window, fd, options, cliWinSize - numInFlight);
+                }
+                else if(numInFlight == 0 && cliWinSize > 0) {
+                    //recovering from window lock on probe response
+                    if(hasData)
+                        hasData = sendMoreData(window, fd, options, cliWinSize );
+                }
+
+            }
+            else {
+                printf("Error in rcv\n");
+            }
         }
         else {
-            printf("Error in rcv\n");
+            //error in poll
+            printf("Error in poll: %d\n", res);
         }
     }
 }

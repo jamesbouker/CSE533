@@ -14,7 +14,11 @@
 static struct sockaddr_in servaddr;
 
 static int finished = 0;
+static int recievedEOF = 0;
 static Window *window = NULL;
+static int lastAck = 0;
+static int option;
+static int connFd;
 
 #pragma mark - Simple Lock
 
@@ -149,7 +153,7 @@ int createSocket(int isLocal, char *ipClient, char *ipServer, int port) {
 
 //sends the filename
 void sendFirstHandshake(int socketFd, int isLocal, char *filename, int windowSize) {
-    int option = (isLocal == 1)? MSG_DONTROUTE : 0;
+    option = (isLocal == 1)? MSG_DONTROUTE : 0;
     send(socketFd,filename,strlen(filename),option);
   
     char msg[MAXLINE];
@@ -171,49 +175,61 @@ void sendFirstHandshake(int socketFd, int isLocal, char *filename, int windowSiz
 
 void recieveFile(int socketFd, float dropProb, int isLocal) {
     int option = (isLocal == 1)? MSG_DONTROUTE : 0;
-    char rcvBuf[MAXLINE]; 
-    char sendingBuf[MAXLINE];
+    char rcvBuf[MAX_PACKET]; 
+    char rcvContent[MAX_CONTENT];
+    char sendingBuf[MAX_PACKET];
     bzero(rcvBuf, sizeof(rcvBuf));
+    bzero(rcvContent, sizeof(rcvContent));
+
     int nrecv;
     char *eof = "EOFEOFEOFEOF";
 
     int seqNum = 0;
-    while((nrecv = recv(socketFd, rcvBuf, MAXLINE, 0)) >= 0) {
+    int isEOF = 0;
+    int isProbe = 0;
+
+    connFd = socketFd;
+
+    while((nrecv = recv(socketFd, rcvBuf, MAX_PACKET, 0)) >= 0) {
         block(4);
-        printf("Main thread locked the window\n");
-        printf("CHUNK RECEIVED: %s\n", rcvBuf);
+        printf("recv: %s\n", rcvBuf);
         bzero(sendingBuf, sizeof(sendingBuf));
 
         //check if packet lost
         if(((rand() % 100) / 100.0) > dropProb) {
             int spaceLeft = availWindoSize(window);
-            int nextAck = window->ptr->seqNum;
+            sscanf(rcvBuf, "Header: SeqNum: %d EOF: %d Probe: %d Content: %s", &seqNum, &isEOF, &isProbe, rcvContent);
 
-            //case for full buffer and ptr not moved
-            if(window->ptr->arrived)
-                nextAck++;
-            if(spaceLeft > 0) {
-                insertPacket(window, rcvBuf, seqNum);
+            if(isProbe) {
                 int recvSize = availWindoSize(window);
-                sprintf(sendingBuf, "ACK:%d WinSize:%d", nextAck, recvSize);
+                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d", lastAck, recvSize);
+                printf("Sending window update to server: %s\n", sendingBuf);
+                send(socketFd,sendingBuf,strlen(sendingBuf),option);
+            }
+            else if(spaceLeft > 0) {
+                lastAck = insertPacket(window, rcvBuf, seqNum);
+                int recvSize = availWindoSize(window);
+                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d", lastAck, recvSize);
                 printf("Sending to server: %s\n", sendingBuf);
                 send(socketFd,sendingBuf,strlen(sendingBuf),option);
 
-                if(strcmp(eof, rcvBuf) == 0) {
+                if(isEOF == 1) {
+                    recievedEOF = 1;
                     printf("Recieved EOF from server\n");
                     break;
                 }
             }
             else {
-                printf("Window is full, packet ignored: %d\n", nextAck);
+                printf("Window is full, packet ignored: %d\n", seqNum);
             }
         }
         else {
             printf("producer dropped packet: %d\n", seqNum);    
         }
 
-        seqNum++;
         bzero(rcvBuf, sizeof(rcvBuf));
+        bzero(rcvContent, sizeof(rcvContent));
+
         unlock(4);
         printf("Main thread unlocked the window\n");
     }
@@ -232,22 +248,31 @@ void recieveFile(int socketFd, float dropProb, int isLocal) {
 
 static void * runConsumerThread(void *arg) {
     Pthread_detach(pthread_self());
-    printf("Consumer Thread running\n");
-    printf("WindowNumCells: %d\n", window->numberCells);
     for(;;) {
-        printf("Consumer Thread Woke Up To Read\n");
-        
         block(2);
-        printf("Consumer thread locked the window\n");
 
+        int sizeBeforeRead = availWindoSize(window);
         readFromWindow(window, 5);
         printWindow(window);
-
+        int size = availWindoSize(window);
+        
+        if(size == window->numberCells && recievedEOF == 1) {
+            break;   
+        }
+        else if(sizeBeforeRead == 0 && size > 0) {
+            //send window update
+            char sendingBuf[MAX_PACKET]; 
+            bzero(sendingBuf, sizeof(sendingBuf));
+            sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d", lastAck, size);
+            printf("Sending window update to server: %s\n", sendingBuf);
+            send(connFd,sendingBuf,strlen(sendingBuf),option);
+        }
+        
         unlock(2);
-        printf("Consumer thread unlocked the window\n");
-
         sleep(1);
     }
+
+    unlock(2);
 
     return NULL;
 }
@@ -279,7 +304,7 @@ int main(int argc, char **argv) {
     
     Readline(fd, filename, MAXLINE);
     removeNewLine(filename);
-    printf("filename: %s\n",filename);
+    printf("filename: %s\n",filename); 
     
     Readline(fd, line, MAXLINE);
     int windowSize = atoi(line);
