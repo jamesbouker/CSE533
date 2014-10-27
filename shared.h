@@ -85,6 +85,31 @@ int availWindoSize(Window *window) {
     return windowSize;
 }
 
+//user by client
+void readFromWindow(Window *window, int numCells) {
+    printf("Reading from window\n");
+    int youngster = youngestCell(window);
+    int ptrIndex = oldestCell(window);
+    int newSeqNum = window->cells[youngster].seqNum+1;
+    WindowCell *ptr = &window->cells[ptrIndex];
+    int i;
+    for(i=0; i<numCells; i++) {
+
+        if(ptr->arrived) {
+            printf("\nReading datagram from window w/ SeqNum: %d\nData: %s\n\n", ptr->seqNum, ptr->data);
+            ptr->arrived = 0;
+            ptr->seqNum = newSeqNum;
+            bzero(ptr->data, sizeof(ptr->data));
+            newSeqNum++;
+        }
+        else
+            break;
+
+        ptrIndex++;
+        ptrIndex = ptrIndex % window->numberCells;
+    }
+}
+
 //used by server
 void printRcvWindow(Window *window) {
     int size = numberOpenSendCells(window);
@@ -130,7 +155,6 @@ WindowCell * addToWindow(Window *window, char *data) {
     return lastPtr;
 }
 
-//used by server
 int oldestCell(Window *window) {
     int index = 0;
     int prevSeqNum = window->cells[0].seqNum;
@@ -146,7 +170,6 @@ int oldestCell(Window *window) {
     }
 }
 
-//used by server
 int youngestCell(Window *window) {
     int index = 0;
     int prevSeqNum = window->cells[0].seqNum;

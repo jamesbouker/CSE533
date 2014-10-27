@@ -13,7 +13,25 @@
 
 static struct sockaddr_in servaddr;
 
-#pragma mark - Main
+static int finished = 0;
+static Window *window = NULL;
+
+#pragma mark - Simple Lock
+
+static int lock = 0;
+
+void block(int myId) {
+    while(lock != myId) {
+        if(lock == 0)
+            lock = myId;
+        sleep(0.05);
+    }
+}
+
+void unlock(int myId) {
+    if(lock == myId)
+        lock = 0;
+}
 
 int checkIfLocal(char *serverIp, char *clientIp) {
     struct ifi_info *ifi, *ifihead;
@@ -151,9 +169,8 @@ void sendFirstHandshake(int socketFd, int isLocal, char *filename, int windowSiz
     send(socketFd, smsg, strlen(smsg), option);
 }
 
-void recieveFile(int socketFd, int windowSize, float dropProb, int isLocal) {
+void recieveFile(int socketFd, float dropProb, int isLocal) {
     int option = (isLocal == 1)? MSG_DONTROUTE : 0;
-    Window *window = makeWindow(windowSize);
     char rcvBuf[MAXLINE]; 
     char sendingBuf[MAXLINE];
     bzero(rcvBuf, sizeof(rcvBuf));
@@ -162,38 +179,86 @@ void recieveFile(int socketFd, int windowSize, float dropProb, int isLocal) {
 
     int seqNum = 0;
     while((nrecv = recv(socketFd, rcvBuf, MAXLINE, 0)) >= 0) {
+        block(4);
+        printf("Main thread locked the window\n");
         printf("CHUNK RECEIVED: %s\n", rcvBuf);
         bzero(sendingBuf, sizeof(sendingBuf));
 
         //check if packet lost
         if(((rand() % 100) / 100.0) > dropProb) {
-            insertPacket(window, rcvBuf, seqNum);
-            int recvSize = availWindoSize(window);
+            int spaceLeft = availWindoSize(window);
             int nextAck = window->ptr->seqNum;
-            sprintf(sendingBuf, "ACK:%d WinSize:%d", nextAck, recvSize);
-            printf("Sending to server: %s\n", sendingBuf);
-            send(socketFd,sendingBuf,strlen(sendingBuf),option);
 
-            if(strcmp(eof, rcvBuf) == 0) {
-                printf("Recieved EOF from server\n");
-                break;
+            //case for full buffer and ptr not moved
+            if(window->ptr->arrived)
+                nextAck++;
+            if(spaceLeft > 0) {
+                insertPacket(window, rcvBuf, seqNum);
+                int recvSize = availWindoSize(window);
+                sprintf(sendingBuf, "ACK:%d WinSize:%d", nextAck, recvSize);
+                printf("Sending to server: %s\n", sendingBuf);
+                send(socketFd,sendingBuf,strlen(sendingBuf),option);
+
+                if(strcmp(eof, rcvBuf) == 0) {
+                    printf("Recieved EOF from server\n");
+                    break;
+                }
+            }
+            else {
+                printf("Window is full, packet ignored: %d\n", nextAck);
             }
         }
         else {
-            printf("packet dropped: %d\n", seqNum);    
+            printf("producer dropped packet: %d\n", seqNum);    
         }
-        seqNum++;
 
+        seqNum++;
         bzero(rcvBuf, sizeof(rcvBuf));
+        unlock(4);
+        printf("Main thread unlocked the window\n");
     }
 
     printf("Exiting the while loop\n");
+    unlock(4);
+    printf("Main thread unlocked the window\n");
 
     if(nrecv < 0) {
         perror("error receiving across network!\n");
         exit(1);
     }
 }
+
+#pragma mark - Consumer
+
+static void * runConsumerThread(void *arg) {
+    Pthread_detach(pthread_self());
+    printf("Consumer Thread running\n");
+    printf("WindowNumCells: %d\n", window->numberCells);
+    for(;;) {
+        printf("Consumer Thread Woke Up To Read\n");
+        
+        block(2);
+        printf("Consumer thread locked the window\n");
+
+        readFromWindow(window, 5);
+        printWindow(window);
+
+        unlock(2);
+        printf("Consumer thread unlocked the window\n");
+
+        sleep(1);
+    }
+
+    return NULL;
+}
+
+void spawnConsumerThread() {
+    printf("Spawning consumer thread\n");
+    pthread_t tid;
+    Pthread_create(&tid, NULL, &runConsumerThread, NULL);
+}
+
+#pragma mark - Main
 
 int main(int argc, char **argv) {
     char line[MAXLINE];
@@ -240,6 +305,13 @@ int main(int argc, char **argv) {
     int socketFd = createSocket(isLocal, clientIp, serverIp, port);
 
     sendFirstHandshake(socketFd, isLocal, filename, windowSize);
-    
-    recieveFile(socketFd, windowSize, prob, isLocal);
+    window = makeWindow(windowSize);
+    spawnConsumerThread();
+    recieveFile(socketFd, prob, isLocal);
+
+    for(;;) {
+        if(finished)
+            break;
+        sleep(1);
+    }
 }

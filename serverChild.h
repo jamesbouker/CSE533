@@ -166,7 +166,7 @@ void handleDataTransfer(Window * window, int  fd, int options, int hasData) {
             sscanf(rcvBuf, "ACK:%d WinSize:%d", &ackNum, &cliWinSize);
             bzero(rcvBuf, sizeof(rcvBuf));
 
-            if(lastACK != ackNum) {
+            if(lastACK < ackNum) {
                 lastACK = ackNum;
                 ackCount = 0;
                 printf("Now waiting on ACK: %d\n", lastACK+1);
