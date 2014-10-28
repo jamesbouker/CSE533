@@ -91,7 +91,7 @@ int availWindoSize(Window *window) {
 }
 
 //user by client
-void readFromWindow(Window *window, int numCells) {
+void readFromWindow(Window *window, int numCells, FILE *outputFile) {
     printf("Reading from window\n");
     int youngster = youngestCell(window);
     int ptrIndex = oldestCell(window);
@@ -102,6 +102,7 @@ void readFromWindow(Window *window, int numCells) {
 
         if(ptr->arrived) {
             printf("\nReading datagram from window w/ SeqNum: %d\nData: %s\n\n", ptr->seqNum, ptr->data);
+            fputs(ptr->data, outputFile);
             ptr->arrived = 0;
             ptr->seqNum = newSeqNum;
             bzero(ptr->data, sizeof(ptr->data));
@@ -119,6 +120,7 @@ void readFromWindow(Window *window, int numCells) {
 
         ptrIndex++;
         ptrIndex = ptrIndex % window->numberCells;
+        ptr = &window->cells[ptrIndex];
     }
 }
 
@@ -152,6 +154,7 @@ void printWindow(Window *window) {
 
 //user by server
 WindowCell * addToWindow(Window *window, char *data) {
+    bzero(window->ptr->data, sizeof(window->ptr->data));
     strcpy(window->ptr->data, data);
 
     int firstSeqNum = window->ptr->seqNum;
@@ -208,13 +211,16 @@ void windowRecieved(Window* window, int numberPackets) {
 
     int youngIndx = youngestCell(window);
     WindowCell *youngster = &window->cells[youngIndx];
+    int highestSeqNum = youngster->seqNum;
 
     for(i=0; i<numberPackets; i++) {
-        WindowCell *cell = &window->cells[index+i];
+        WindowCell *cell = &window->cells[index];
         cell->inFlight = 0;
-        cell->seqNum = youngster->seqNum+i+1;
+        cell->seqNum = highestSeqNum+i+1;
         bzero(cell->data, sizeof(cell->data));
+
         index++;
+        index = index % window->numberCells;
     }
 }
 
@@ -311,7 +317,7 @@ typedef struct {
     uint32_t actualIp;
     uint32_t actualNetwork;
     uint32_t actualSubnet;
-    void *next;
+    void *next; 
 } SocketInfo;
 
 static SocketInfo* SocketInfoMake(int sockFd, char *ipAddress, char *networkMask) {
@@ -320,7 +326,7 @@ static SocketInfo* SocketInfoMake(int sockFd, char *ipAddress, char *networkMask
     
     SocketInfo *si = malloc(sizeof(SocketInfo));
     si->sockFd = sockFd;
-    strcpy(si->readableIp, ipAddress);
+    strcpy(si->readableIp, ipAddress); 
     strcpy(si->readableNetwork, networkMask);
     
     inet_pton(AF_INET, ipAddress, &si->actualIp);

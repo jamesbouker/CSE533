@@ -15,12 +15,12 @@ extern struct ifi_info *get_ifi_info_plus(int family, int doaliases);
 extern        void      free_ifi_info_plus(struct ifi_info *ifihead);
 
 SocketInfo* createListeningSockets(int port, int windowSize) {
-    struct ifi_info	*ifi, *ifihead;
-    struct sockaddr	*sa;
+    struct ifi_info *ifi, *ifihead;
+    struct sockaddr *sa;
     SocketInfo *socketInfo = NULL;
     
-    u_char		*ptr;
-    int		i, family, doaliases;
+    u_char      *ptr;
+    int     i, family, doaliases;
     
     family = AF_INET;
     doaliases = 1;
@@ -40,7 +40,7 @@ SocketInfo* createListeningSockets(int port, int windowSize) {
             printf("IP: %s\n", tempIp);
             listenfd = Socket(AF_INET, SOCK_DGRAM, 0);
             Setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-            struct sockaddr_in	servaddr;
+            struct sockaddr_in  servaddr;
             bzero(&servaddr, sizeof(servaddr));
             servaddr.sin_family      = AF_INET;
             servaddr.sin_port        = htons(port);

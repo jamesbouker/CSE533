@@ -6,6 +6,9 @@
 
 static uint16_t serverPort;
 static int connFd;
+static int probeLater = 0;
+
+#define EOFTXT  "EOFEOFEOFEOF"
 
 int checkIfClientLocal(SocketInfo *root, char *ipClient) {
     SocketInfo *inf;
@@ -101,15 +104,17 @@ int waitForThirdHandshake() {
     return cliWinSize;
 }
 
-void sendWindowCell(WindowCell *cell, int options, int isEof) {
+void sendWindowCell(WindowCell *cell, int options, int isEof, Window *window) {
     char toSend[MAX_PACKET];
     bzero(toSend, sizeof(toSend));
 
     cell->inFlight = 1;
-    snprintf(toSend, MAX_PACKET,"Header: SeqNum: %d EOF: %d Probe: %d Content: %s", cell->seqNum, isEof, 0, cell->data);
+    snprintf(toSend, MAX_PACKET,"Header: SeqNum: %d EOF: %d Probe: %d Terminate: %d Content: %s END OF PACKET", cell->seqNum, isEof, 0,0, cell->data);
     
-    printf("Sending data: %s\n", toSend);
+    printf("\nSending data: %s\n", toSend);
     send(connFd,toSend,strlen(toSend),options);
+
+    printServerWindow(window);
 }
 
 int sendMoreData(Window *window, int fd, int options, int cliWinSize) {
@@ -124,6 +129,7 @@ int sendMoreData(Window *window, int fd, int options, int cliWinSize) {
         printf("About to send %d packets to client\n", numberPacketsToSend);
     else {
         printf("Client Window is full, we need to probe later\n");
+        probeLater = 1;
     }
 
     for(i=0; i<numberPacketsToSend; i++) {
@@ -134,14 +140,14 @@ int sendMoreData(Window *window, int fd, int options, int cliWinSize) {
             printf("\n\nREAD: %d\n", i);
             //printf("buff: %s\n", buff);
             WindowCell *cell = addToWindow(window, buff);
-            sendWindowCell(cell, options, 0);
+            sendWindowCell(cell, options, 0, window);
         }
         else if(nread == 0) {
             //we read EOF
             printf("\n\nREAD EOF: %d\n", i);
             //printf("buff: %s\n", buff);
-            WindowCell *cell = addToWindow(window, "EOFEOFEOFEOF");
-            sendWindowCell(cell, options, 1);
+            WindowCell *cell = addToWindow(window, EOFTXT);
+            sendWindowCell(cell, options, 1, window);
             hasData = 0;
             break;
         }
@@ -161,13 +167,47 @@ int sendMoreData(Window *window, int fd, int options, int cliWinSize) {
     return hasData;
 }
 
+void sendTerminate(int options) {
+    char toSend[MAX_PACKET];
+    bzero(toSend, sizeof(toSend));
+    snprintf(toSend, MAX_PACKET,"Header: SeqNum: %d EOF: %d Probe: %d Terminate: %d Content: %s END OF PACKET", 0, 0, 0, 1,"");
+    
+    printf("Sending Terminate: %s\n", toSend);
+    send(connFd,toSend,strlen(toSend),options);
+
+    sleep(5);
+}
+
 void sendProbe(int options) {
     char toSend[MAX_PACKET];
     bzero(toSend, sizeof(toSend));
-    snprintf(toSend, MAX_PACKET,"Header: SeqNum: %d EOF: %d Probe: %d Content: %s", 0, 0, 1, "");
+    snprintf(toSend, MAX_PACKET,"Header: SeqNum: %d EOF: %d Probe: %d Terminate: %d Content: %s END OF PACKET", 0, 0, 1, 0, "");
     
     printf("Sending Probe: %s\n", toSend);
     send(connFd,toSend,strlen(toSend),options);
+}
+
+void resendWindow(Window *window, int seqNum, int options) {
+    int index = oldestCell(window);
+    WindowCell *cell = &window->cells[index];
+    int isEOF = 0;
+    int firstSeqNum = cell->seqNum;
+
+    for(;;) {
+        if(cell->inFlight == 1) {
+            if(strcmp(EOFTXT, cell->data) == 0)
+                isEOF = 1;
+            sendWindowCell(cell, options, isEOF, window);
+
+            index++;
+            index = index % window->numberCells;
+            cell = &window->cells[index]; 
+            if(cell->seqNum <= firstSeqNum)
+                break;
+        }
+        else 
+            break;
+    }
 }
 
 void handleDataTransfer(Window * window, int  fd, int options, int hasData) {
@@ -176,7 +216,8 @@ void handleDataTransfer(Window * window, int  fd, int options, int hasData) {
     char rcvBuf[MAX_PACKET];
     int ackNum;
     int cliWinSize;
-    int numAcks;
+    int numAcks; 
+    int transferDone;
 
     for(;;) {
         struct pollfd pollFD;
@@ -187,16 +228,28 @@ void handleDataTransfer(Window * window, int  fd, int options, int hasData) {
 
         if (res == 0) {
             // timeout
-            printf("\nTIMEOUT in recv: sending probe\n\n");
-            sendProbe(options);
+            if(probeLater == 1) {
+                probeLater = 0;
+                printf("\nTIMEOUT in recv: sending probe\n\n");
+                sendProbe(options);
+            }
+            else {
+                printf("\nTIMEOUT in recv: resending window\n\n");
+                resendWindow(window, lastACK, options);
+            }
         }
         else if (res != -1) {
             if(recv(connFd, rcvBuf, MAX_PACKET, 0) >= 0) {
                 printf("Server recieved: %s\n", rcvBuf);
-                sscanf(rcvBuf, "Header: SeqNum: %d WinSize: %d", &ackNum, &cliWinSize);
+                sscanf(rcvBuf, "Header: SeqNum: %d WinSize: %d Done: %d", &ackNum, &cliWinSize, &transferDone);
                 bzero(rcvBuf, sizeof(rcvBuf));
 
-                if(lastACK < ackNum) {
+                if(transferDone) {
+                    printf("Transfer complete\n");
+                    sendTerminate(options);
+                    break;
+                }
+                else if(lastACK < ackNum) {
                     lastACK = ackNum;
                     ackCount = 0;
                     printf("Now waiting on ACK: %d\n", lastACK+1);
@@ -207,8 +260,7 @@ void handleDataTransfer(Window * window, int  fd, int options, int hasData) {
                     if(ackCount >= 3) {
                         printf("Recieved 3 other ACKS while waiting on ACK: %d\n", lastACK+1);
                         printf("Time to resend!\n\n");
-                        //todo: call resendWindow()
-                        //keep the continue here!
+                        resendWindow(window, lastACK, options); 
                         continue;
                     }
                 }
