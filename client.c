@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
 
 #include "unpifiplus.h"
 #include "shared.h"
@@ -19,6 +20,10 @@ static Window *window = NULL;
 static int lastAck = 0;
 static int option;
 static int connFd;
+static int latestTimeStamp;
+static float dropProb;
+static int meanReadTime;
+static int numConsecTimeoutsForACK = 0;
 
 #pragma mark - Simple Lock
 
@@ -37,7 +42,7 @@ void unlock(int myId) {
         lock = 0;
 }
 
-int checkIfLocal(char *serverIp, char *clientIp) {
+int checkIfSameNode(char *serverIp, char *clientIp) {
     struct ifi_info *ifi, *ifihead;
     struct sockaddr *sa;
     SocketInfo *socketInfo = NULL;
@@ -94,7 +99,6 @@ int checkIfLocal(char *serverIp, char *clientIp) {
     }
     
     if(found == 0) {
-        printf("Server is not local\n");
         if(possibleNonLocal != NULL) {
             strcpy(clientIp, possibleNonLocal->readableIp);
         }
@@ -102,8 +106,16 @@ int checkIfLocal(char *serverIp, char *clientIp) {
             printf("there is no ip adress found for client, using 127.0.0.1\n");
         }
     }
+
+    if(checkIfOnSameNetwork(socketInfo, serverIp)) {
+        printf("Server is on same network as client\n");
+        found = 1;
+    }
+    else {
+        printf("Server and client on different networks\n");
+    }
     
-    printf("Debug IPServer: %s\nDebug IPClient: %s\nDebug values\nSee GetSockName below for real IPClient\nSee GetPeerName below for real IPserver\n\n", serverIp, clientIp);
+    //printf("Debug IPServer: %s\nDebug IPClient: %s\nDebug values\nSee GetSockName below for real IPClient\nSee GetPeerName below for real IPserver\n\n", serverIp, clientIp);
     
     return found;
 }
@@ -114,12 +126,10 @@ int createSocket(int isLocal, char *ipClient, char *ipServer, int port) {
     int len = sizeof(struct sockaddr);
     char readableIp[MAXLINE];
     
-    printf("Creating socket:\n");
-    
     int listenfd = Socket(AF_INET, SOCK_DGRAM, 0);
     Setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
     if(isLocal) {
-        printf("Set DONTROUTE socket option\n");
+        printf("Setting DONTROUTE socket option\n");
         Setsockopt(listenfd, SOL_SOCKET, SO_DONTROUTE, &on, sizeof(on));
     }
     printf("\n");
@@ -173,7 +183,31 @@ void sendFirstHandshake(int socketFd, int isLocal, char *filename, int windowSiz
     send(socketFd, smsg, strlen(smsg), option);
 }
 
-void recieveFile(int socketFd, float dropProb, int isLocal) {
+int shouldDrop() {
+    if(((float)rand() / (float)RAND_MAX) < dropProb) 
+        return 1;
+    else
+        return 0;
+}
+
+void timeout(int sig) {
+    //timeout
+    if(finished == 0 && recievedEOF == 0) {
+        numConsecTimeoutsForACK++;
+        if(numConsecTimeoutsForACK > 6) {
+            if(finished == 0)
+                finished = -1;
+            printf("Client giving up: Server not responding\n");
+        }
+        else {
+            signal(SIGALRM, timeout);
+            alarm(3);
+        }
+    }
+}
+
+void recieveFile(int socketFd, float dProb, int isLocal) {
+    dropProb = dProb;
     int option = (isLocal == 1)? MSG_DONTROUTE : 0;
     char rcvBuf[MAX_PACKET]; 
     char rcvContent[MAX_CONTENT+1];
@@ -188,58 +222,79 @@ void recieveFile(int socketFd, float dropProb, int isLocal) {
     int isEOF = 0;
     int isProbe = 0;
     int terminate = 0;
+    int timestamp = 0;
 
     connFd = socketFd;
 
-    while((nrecv = recv(socketFd, rcvBuf, MAX_PACKET, 0)) >= 0) {
+    //signal(SIGALRM, timeout);
+    //alarm(3);
+
+    while(recievedEOF == 0 && (nrecv = recv(socketFd, rcvBuf, MAX_PACKET, 0)) >= 0) {
+        sigset_t *signal_set = malloc(sizeof(sigset_t));
+        sigemptyset(signal_set);
+        sigaddset(signal_set, SIGALRM);
+        sigprocmask(SIG_BLOCK, signal_set, NULL);
+
         block(4);
-        printf("\n\nRECV: %s\n", rcvBuf);
+        // printf("\n\nRECV: %s\n", rcvBuf);
         bzero(sendingBuf, sizeof(sendingBuf));
-        sscanf(rcvBuf, "Header: SeqNum: %d EOF: %d Probe: %d Terminate: %d Content: %412c END OF PACKET", &seqNum, &isEOF, &isProbe, &terminate, rcvContent);
-        printf("rcvContent: %s\n", rcvContent);
+        sscanf(rcvBuf, "Header: SeqNum: %d EOF: %d Probe: %d Terminate: %d TS: %d Content: %412c END OF PACKET", &seqNum, &isEOF, &isProbe, &terminate, &timestamp, rcvContent);
+        // printf("rcvContent: %s\n", rcvContent);
+        printf("Recieved SeqNum: %d ", seqNum);
 
-        if(((rand() % 100) / 100.0) > dropProb) {
-            int spaceLeft = availWindoSize(window);
+        if(shouldDrop() == 0) {
+            printf("- producer keeping packet\n");
+            numConsecTimeoutsForACK = 0;
+            int spaceLeft = availWindoSize(window); 
+            latestTimeStamp = timestamp;
 
-
-            if(terminate) {
-                printf("Recieved terminate from server\n");
-                break;
-            }
-            else if(isProbe) {
+            if(isProbe) {
                 int recvSize = availWindoSize(window);
-                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d Done: %d", lastAck, recvSize, recievedEOF);
+                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d TS: %d Done: %d", lastAck, recvSize, timestamp, recievedEOF);
                 printf("Client Probed: Sending window update to server: %s\n", sendingBuf);
-                send(socketFd,sendingBuf,strlen(sendingBuf),option);
+
+                if(shouldDrop() == 0)
+                    send(socketFd,sendingBuf,strlen(sendingBuf),option);
+                else 
+                    printf("send() dropped for ack: %d\n", lastAck);
             }
             else if(spaceLeft > 0) {
                 lastAck = insertPacket(window, rcvContent, seqNum);
                 int recvSize = availWindoSize(window);
-                if(isEOF == 1 && seqNum <= lastAck) {
+                if(isEOF == 1) {
                     recievedEOF = 1;
                     printf("Recieved EOF from server\n");
                 }
 
-                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d Done: %d", lastAck, recvSize, recievedEOF);
+                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d TS: %d Done: %d", lastAck, recvSize, timestamp, recievedEOF);
                 printf("Sending to server: %s\n", sendingBuf);
-                send(socketFd,sendingBuf,strlen(sendingBuf),option);
+                if(shouldDrop() == 0)
+                    send(socketFd,sendingBuf,strlen(sendingBuf),option);
+                else
+                    printf("send() dropped for ack: %d\n", lastAck);
             }
             else {
                 printf("Window is full, packet ignored: %d\n", seqNum);
             }
         }
         else {
-            printf("producer dropped packet: %d\n", seqNum);    
+            printf("- producer dropping packet.\n");    
         }
 
         bzero(rcvBuf, sizeof(rcvBuf));
         bzero(rcvContent, sizeof(rcvContent));
-
+        sigprocmask(SIG_UNBLOCK, signal_set, NULL);
+        free(signal_set);
         unlock(4);
     }
 
-    printf("Exiting file transfer\n");
     unlock(4);
+
+    printf("Exiting file transfer\n");
+
+    if(recievedEOF) {
+        sleep(5);
+    }
 
     if(nrecv < 0) {
         perror("error receiving across network!\n");
@@ -257,7 +312,7 @@ static void * runConsumerThread(void *arg) {
         block(2);
 
         int sizeBeforeRead = availWindoSize(window);
-        readFromWindow(window, 5, outputFile);
+        readFromWindow(window, window->numberCells, outputFile);
         printWindow(window);
         int size = availWindoSize(window);
         
@@ -271,13 +326,22 @@ static void * runConsumerThread(void *arg) {
             //send window update
             char sendingBuf[MAX_PACKET]; 
             bzero(sendingBuf, sizeof(sendingBuf));
-            sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d Done: %d", lastAck, size, recievedEOF);
+            sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d TS: %d Done: %d", lastAck, size, latestTimeStamp, recievedEOF);
             printf("\nConsumer cleaned up full buffer:\nSending window update to server: %s\n", sendingBuf);
-            send(connFd,sendingBuf,strlen(sendingBuf),option);
+            if(shouldDrop() == 0)
+                send(connFd,sendingBuf,strlen(sendingBuf),option);
+            else
+                printf("send() dropped for ack: %d\n", lastAck);
         }
         
-        unlock(2);
-        sleep(1);
+        float offset = (((float)rand() / (float)RAND_MAX) - 0.5) * meanReadTime;
+        float sleepTimeMS = meanReadTime + offset;
+        float sleepTimeS = sleepTimeMS / 1000;
+        printf("Consumer sleeping for %f seconds\n", sleepTimeS);
+        sleepTimeS = max(sleepTimeS, 1);
+        
+        unlock(2); 
+        sleep(sleepTimeS);
     }
 
     unlock(2);
@@ -329,12 +393,12 @@ int main(int argc, char **argv) {
     
     
     Readline(fd, line, MAXLINE);
-    int readingRate = atoi(line);
-    printf("readingRate: %d\n\n",readingRate);
+    meanReadTime = atoi(line);
+    printf("readingRate: %d\n\n",meanReadTime);
     
     close(fd);
     
-    int isLocal = checkIfLocal(serverIp, clientIp);
+    int isLocal = checkIfSameNode(serverIp, clientIp);
     int socketFd = createSocket(isLocal, clientIp, serverIp, port);
 
     sendFirstHandshake(socketFd, isLocal, filename, windowSize);
@@ -343,8 +407,11 @@ int main(int argc, char **argv) {
     recieveFile(socketFd, prob, isLocal);
 
     for(;;) {
-        if(finished) {
+        if(finished == 1) {
             printf("File transfer complete, terminating\n\n");
+            break;
+        }
+        else if(finished == -1) {
             break;
         }
         sleep(1);

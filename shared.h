@@ -1,6 +1,9 @@
 #ifndef __shared_h
 #define __shared_h
 
+#include <stdio.h>
+#include "unpifiplus.h"
+
 #define MAX_HEADER      100
 #define MAX_CONTENT     412
 #define MAX_PACKET      (MAX_HEADER + MAX_CONTENT)
@@ -125,9 +128,9 @@ void readFromWindow(Window *window, int numCells, FILE *outputFile) {
 }
 
 //used by server
-void printServerWindow(Window *window) {
+void printServerWindow(Window *window, char *msg) {
     int size = numberOpenSendCells(window);
-    printf("Window Stats:\nSize: %d/%d free\n", size, window->numberCells);
+    printf("Window Stats after %s:\nSize: %d/%d free\n", msg, size, window->numberCells);
     int i;
     printf("SeqNum: \t");
     for(i=0; i < window->numberCells; i++)
@@ -150,6 +153,31 @@ void printWindow(Window *window) {
     for(i=0; i < window->numberCells; i++)
         printf("|%d", window->cells[i].arrived);
     printf("\n\n");
+}
+
+WindowCell * getOldestWithDataNotInFlight(Window *window) {
+    int index = oldestCell(window);
+
+    // printf("getOldestWithDataNotInFlight: oldestIndex: %d\n", index);
+    int firstIndex = index;
+
+    for(;;) {
+        // printf("index: %d inFlight: %d data: %s\n\n", index, window->cells[index].inFlight, window->cells[index].data);
+        if(window->cells[index].inFlight == 0) {
+            if(strcmp(window->cells[index].data, "") != 0)
+                return &window->cells[index];
+            else
+                return NULL;
+        }
+
+        index++;
+        index = index % window->numberCells;
+
+        if(index == firstIndex)
+            break;
+    }
+
+    return NULL;
 }
 
 //user by server
@@ -237,7 +265,9 @@ int numberOfInFlightPackets(Window *window) {
 //used by server
 int numberOpenSendCells(Window *window) {
     int firstSeqNum = window->ptr->seqNum;
-    WindowCell *ptr = window->ptr;
+    WindowCell *ptr = getOldestWithDataNotInFlight(window);
+    if(ptr == NULL)
+        ptr = window->ptr;
     int index = indexOfCell(window, ptr);
     int size = 0;
 
@@ -261,7 +291,7 @@ int numberOpenSendCells(Window *window) {
 //used by client
 int insertPacket(Window *window, char *msg, int seqNum) {
     //give data to cell
-    printf("Insert Packet: %s\n", msg);
+    //printf("Insert Packet: %s\n", msg);
 
     WindowCell *cell = cellForSeqNum(window, seqNum);
     if(cell != NULL) {
@@ -302,6 +332,9 @@ int insertPacket(Window *window, char *msg, int seqNum) {
         printf("\nPacket arrived for seqNum: %d\nNext expected seqNum: %d\n\n", seqNum, lastPtr->seqNum + full);
         window->ptr = lastPtr;
     }
+    else {
+        printf("Packet ignored: already recieved\n");
+    }
 
     printWindow(window);
     return window->ptr->seqNum + full;
@@ -320,6 +353,31 @@ typedef struct {
     void *next; 
 } SocketInfo;
 
+
+//binrep function taken from http://stackoverflow.com/questions/699968/display-the-binary-representation-of-a-number-in-c
+// converts an integer 'val' to binary string representation
+char * binrep (unsigned int val, char *buff, int sz) {
+    char *pbuff = buff;
+    if (sz < 1) { 
+        return NULL;
+    }
+    if (val == 0) {
+        *pbuff++ = '0';
+        *pbuff = '\0';
+        return buff;
+    }
+    pbuff += sz;
+    *pbuff-- = '\0';
+    while (val != 0) {
+        if (sz-- == 0) {
+            return NULL;
+        }
+        *pbuff-- = ((val & 1) == 1) ? '1' : '0';
+        val >>= 1;
+    }
+    return pbuff+1;
+} 
+
 static SocketInfo* SocketInfoMake(int sockFd, char *ipAddress, char *networkMask) {
     removeNewLine(ipAddress);
     removeNewLine(networkMask);
@@ -337,6 +395,7 @@ static SocketInfo* SocketInfoMake(int sockFd, char *ipAddress, char *networkMask
     
     si->next = NULL;
     printf("Socket Info: \nIp: %s - %u\nNetMast: %s - %u\nSubnet: %s - %u\n\n",ipAddress, si->actualIp, networkMask, si->actualNetwork, si->readableSubnet, si->actualSubnet);
+
     return si;
 }
 
@@ -351,4 +410,80 @@ static SocketInfo* lastSocket(SocketInfo* sock) {
     }
     return ptr;
 }
+
+#pragma mark - Prefix Matching
+
+int lengthOfNetMask(char *networkMask) {
+    int count = 0;
+    int i;
+    for(i=0; i<MAXLINE; i++) {
+        if(networkMask[i] == '1')
+            count++;
+        else
+            break;
+    }
+    return count;
+}
+
+int prefixMatchLength(char *ipAdress, char *subnetAdr, int length) {
+    int i;
+    char netMask;
+    char ipAdr;
+    char snetAdr;
+    int count = 0;
+    // printf("Comparing:\n%s\n%s\n%d\n", ipAdress, subnetAdr, length);
+    for(i=0; i<length; i++) {
+        ipAdr = ipAdress[i];
+        snetAdr = subnetAdr[i];
+        if(ipAdr == snetAdr)
+            count++;
+        else {
+            // printf("Failed - %d\n", count);
+            return -1;
+        }
+    }
+    // printf("Matched\n");
+    return count;
+}
+
+int checkIfOnSameNetwork(SocketInfo *root, char *ipClient) {
+    int clientActualIp;
+    inet_pton(AF_INET, ipClient, &clientActualIp);
+
+    char clientBin[MAXLINE];
+    char *clientBinPtr;
+    bzero(clientBin, sizeof(clientBin));
+    clientBinPtr = binrep(clientActualIp, clientBin, MAXLINE);
+    // printf("ip bin: %s\n",clientBinPtr);
+
+    SocketInfo *ptr; 
+    int biggest = 0;
+
+    char *biggestSubnetAdr;
+    char *biggestNetMask;
+    for(ptr = root; ptr != NULL; ptr = ptr->next) {
+        char buff2[MAXLINE];
+        bzero(buff2, sizeof(buff2));
+        char *buff22 = binrep(ptr->actualNetwork, buff2, MAXLINE);
+        int len = lengthOfNetMask(buff22);
+        if(len > biggest) {
+            biggest = len;
+
+            char biggestSubnetAdrTemp[MAXLINE];
+            bzero(biggestSubnetAdrTemp, sizeof(biggestSubnetAdrTemp));
+            biggestSubnetAdr = binrep(ptr->actualSubnet, biggestSubnetAdrTemp, MAXLINE);
+            // printf("biggest so far subnetAdr: %s\n", biggestSubnetAdr);
+
+            char biggestNetMaskTemp[MAXLINE];
+            bzero(biggestNetMaskTemp, sizeof(biggestNetMaskTemp));
+            biggestNetMask = binrep(ptr->actualNetwork, biggestNetMaskTemp, MAXLINE);
+            // printf("biggest so far biggestNetMask: %s\n", biggestNetMask);
+
+            if(prefixMatchLength(clientBinPtr, biggestSubnetAdr, biggest) > 8)
+                return 1;
+        }
+    }
+    return 0;
+}
+
 #endif

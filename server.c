@@ -78,9 +78,7 @@ SocketInfo* createListeningSockets(int port, int windowSize) {
         
         //use select to monitor
         int sel = 0;
-        printf("\nentered select\n\n");
         sel = Select(FD_SETSIZE, &lset, NULL, NULL, NULL);
-        printf("select returned: %d\n", sel);
         if(sel > 0) {
             for(si = socketInfo; si != NULL; si = si->next) {
                 if(FD_ISSET(si->sockFd, &lset)) {
@@ -95,7 +93,7 @@ SocketInfo* createListeningSockets(int port, int windowSize) {
                     printf("msg recieved: %s\nOn: %s\nClient Port: %d\nClient IP: %s\n\n", mesg, si->readableIp, cliPort, cliIp);
                     
                     filename = mesg;
-                    printf("SERVER HAS THE FILENAME!!: %s\n", filename);
+                    printf("Server has file: %s\n", filename);
                     
                     int childpid;
                     if((childpid = Fork()) == 0) {
