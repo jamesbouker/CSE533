@@ -25,6 +25,15 @@ ADRESS BINDING
   Server: Iterates through the list creating listening sockets for each SocketInfo
   Client: Also uses SocketInfo to determine location in networkd of the server 
 
+  Local Vs Non Local: This is done by first building the structure and linked list mentioned above
+    We then iterate through the list finding the greatest prefexi match of the subnet adress and ip adress we are testing.
+    
+
+    Note: We convert ip's from integer to binary string (110101010101000101010) 
+    using a function takend from this stack over flow post
+      http://stackoverflow.com/questions/699968/display-the-binary-representation-of-a-number-in-c
+    **This is the only code we have taken from the internet
+
 RELIABLE UDP
 
   Every packet sent out is assigned a SeqNum. Recievers acknowledge the packet with an ACK back to the sender.

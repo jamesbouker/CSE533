@@ -25,6 +25,12 @@ static float dropProb;
 static int meanReadTime;
 static int numConsecTimeoutsForACK = 0;
 
+static int initSocketFd;
+static int isLocal;
+char * initFilename;
+static int  initWindowSize;
+static int firstHandshakeTimeoutCount = 0;
+
 #pragma mark - Simple Lock
 
 static int lock = 0;
@@ -162,25 +168,59 @@ int createSocket(int isLocal, char *ipClient, char *ipServer, int port) {
 }
 
 //sends the filename
-void sendFirstHandshake(int socketFd, int isLocal, char *filename, int windowSize) {
+void sendFirstHandshake() {
+    firstHandshakeTimeoutCount++;
+    int socketFd = initSocketFd;
+    char *filename = initFilename;
+    int windowSize = initWindowSize;
+
     option = (isLocal == 1)? MSG_DONTROUTE : 0;
     send(socketFd,filename,strlen(filename),option);
   
     char msg[MAXLINE];
     struct sockaddr_in cliaddr;
     socklen_t len = sizeof(cliaddr);
-    recvfrom(socketFd, msg, MAXLINE, 0, (SA*)&cliaddr, &len);
-    removeNewLine(msg);
-    printf("Client recieved second handshake - server port: %s\n", msg);
-    
-    //send the third ACK
-    int servPort = atoi(msg);
-    servaddr.sin_port        = htons(servPort);
-    connect(socketFd, (struct sockaddr *)&servaddr, sizeof(servaddr));
-    printf("sending thirdhandshake to server!! ACK\n");
-    char smsg[MAXLINE];
-    sprintf(smsg, "ThirdHandshake: %d", windowSize);
-    send(socketFd, smsg, strlen(smsg), option);
+
+    struct pollfd pollFD;
+    int res;
+    pollFD.fd = socketFd;
+    pollFD.events = POLLIN;
+    res = poll(&pollFD, 1, 3000);
+
+    if (res == 0) {
+        //timeout
+        printf("TIME OUT AFTER SENDING FIRST HANDSHAKE\n");
+        if(firstHandshakeTimeoutCount > 5) {
+            printf("We have failed to connect to the server more then 5 times\n");
+            printf("Aborting...\n");
+            exit(1);
+        }
+        else {
+            printf("Attempt %d/5\n", firstHandshakeTimeoutCount);
+            printf("Attemping again...\n");
+            sendFirstHandshake();
+            return;
+        }
+    }
+    else if(res != -1) {
+        recvfrom(socketFd, msg, MAXLINE, 0, (SA*)&cliaddr, &len);
+        removeNewLine(msg);
+        if(strlen(msg) > 0)
+            printf("Client recieved second handshake - server port: %s\n", msg);
+        
+        //send the third handshake
+        int servPort = atoi(msg);
+        servaddr.sin_port        = htons(servPort);
+        connect(socketFd, (struct sockaddr *)&servaddr, sizeof(servaddr));
+        printf("sending thirdhandshake to server!! ACK\n");
+        char smsg[MAXLINE];
+        sprintf(smsg, "ThirdHandshake: %d", windowSize);
+        send(socketFd, smsg, strlen(smsg), option);
+    }
+    else {
+        printf("Error in poll, aborting\n");
+        exit(1);
+    }
 }
 
 int shouldDrop() {
@@ -188,22 +228,6 @@ int shouldDrop() {
         return 1;
     else
         return 0;
-}
-
-void timeout(int sig) {
-    //timeout
-    if(finished == 0 && recievedEOF == 0) {
-        numConsecTimeoutsForACK++;
-        if(numConsecTimeoutsForACK > 6) {
-            if(finished == 0)
-                finished = -1;
-            printf("Client giving up: Server not responding\n");
-        }
-        else {
-            signal(SIGALRM, timeout);
-            alarm(3);
-        }
-    }
 }
 
 void recieveFile(int socketFd, float dProb, int isLocal) {
@@ -226,66 +250,82 @@ void recieveFile(int socketFd, float dProb, int isLocal) {
 
     connFd = socketFd;
 
-    //signal(SIGALRM, timeout);
-    //alarm(3);
+    for(;recievedEOF == 0;) {
+        struct pollfd pollFD;
+        int res;
+        pollFD.fd = socketFd;
+        pollFD.events = POLLIN;
+        res = poll(&pollFD, 1, 30 * 1000);
+        if(res == 0) {
+            //timeout
+            printf("We have not recieved anything in 30 seonds. Terminating...\n");
+            exit(1);
+        }
+        else if(res != -1) {
+            //recv
+            if(recievedEOF == 0 && (nrecv = recv(socketFd, rcvBuf, MAX_PACKET, 0)) >= 0) {
+                sigset_t *signal_set = malloc(sizeof(sigset_t));
+                sigemptyset(signal_set);
+                sigaddset(signal_set, SIGALRM);
+                sigprocmask(SIG_BLOCK, signal_set, NULL);
 
-    while(recievedEOF == 0 && (nrecv = recv(socketFd, rcvBuf, MAX_PACKET, 0)) >= 0) {
-        sigset_t *signal_set = malloc(sizeof(sigset_t));
-        sigemptyset(signal_set);
-        sigaddset(signal_set, SIGALRM);
-        sigprocmask(SIG_BLOCK, signal_set, NULL);
+                block(4);
+                // printf("\n\nRECV: %s\n", rcvBuf);
+                bzero(sendingBuf, sizeof(sendingBuf));
+                sscanf(rcvBuf, "Header: SeqNum: %d EOF: %d Probe: %d Terminate: %d TS: %d Content: %412c END OF PACKET", &seqNum, &isEOF, &isProbe, &terminate, &timestamp, rcvContent);
+                // printf("rcvContent: %s\n", rcvContent);
+                printf("Recieved SeqNum: %d ", seqNum);
 
-        block(4);
-        // printf("\n\nRECV: %s\n", rcvBuf);
-        bzero(sendingBuf, sizeof(sendingBuf));
-        sscanf(rcvBuf, "Header: SeqNum: %d EOF: %d Probe: %d Terminate: %d TS: %d Content: %412c END OF PACKET", &seqNum, &isEOF, &isProbe, &terminate, &timestamp, rcvContent);
-        // printf("rcvContent: %s\n", rcvContent);
-        printf("Recieved SeqNum: %d ", seqNum);
+                if(shouldDrop() == 0) {
+                    printf("- producer keeping packet\n");
+                    numConsecTimeoutsForACK = 0;
+                    int spaceLeft = availWindoSize(window); 
+                    latestTimeStamp = timestamp;
 
-        if(shouldDrop() == 0) {
-            printf("- producer keeping packet\n");
-            numConsecTimeoutsForACK = 0;
-            int spaceLeft = availWindoSize(window); 
-            latestTimeStamp = timestamp;
+                    if(isProbe) {
+                        int recvSize = availWindoSize(window);
+                        sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d TS: %d Done: %d", lastAck, recvSize, timestamp, recievedEOF);
+                        printf("Client Probed: Sending window update to server: %s\n", sendingBuf);
 
-            if(isProbe) {
-                int recvSize = availWindoSize(window);
-                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d TS: %d Done: %d", lastAck, recvSize, timestamp, recievedEOF);
-                printf("Client Probed: Sending window update to server: %s\n", sendingBuf);
+                        if(shouldDrop() == 0)
+                            send(socketFd,sendingBuf,strlen(sendingBuf),option);
+                        else 
+                            printf("send() dropped for ack: %d\n", lastAck);
+                    }
+                    else if(spaceLeft > 0) {
+                        lastAck = insertPacket(window, rcvContent, seqNum);
+                        int recvSize = availWindoSize(window);
+                        if(isEOF == 1) {
+                            recievedEOF = 1;
+                            printf("Recieved EOF from server\n");
+                        }
 
-                if(shouldDrop() == 0)
-                    send(socketFd,sendingBuf,strlen(sendingBuf),option);
-                else 
-                    printf("send() dropped for ack: %d\n", lastAck);
-            }
-            else if(spaceLeft > 0) {
-                lastAck = insertPacket(window, rcvContent, seqNum);
-                int recvSize = availWindoSize(window);
-                if(isEOF == 1) {
-                    recievedEOF = 1;
-                    printf("Recieved EOF from server\n");
+                        sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d TS: %d Done: %d", lastAck, recvSize, timestamp, recievedEOF);
+                        printf("Sending to server: %s\n", sendingBuf);
+                        if(shouldDrop() == 0)
+                            send(socketFd,sendingBuf,strlen(sendingBuf),option);
+                        else
+                            printf("send() dropped for ack: %d\n", lastAck);
+                    }
+                    else {
+                        printf("Window is full, packet ignored: %d\n", seqNum);
+                    }
+                }
+                else {
+                    printf("- producer dropping packet.\n");    
                 }
 
-                sprintf(sendingBuf, "Header: SeqNum: %d WinSize: %d TS: %d Done: %d", lastAck, recvSize, timestamp, recievedEOF);
-                printf("Sending to server: %s\n", sendingBuf);
-                if(shouldDrop() == 0)
-                    send(socketFd,sendingBuf,strlen(sendingBuf),option);
-                else
-                    printf("send() dropped for ack: %d\n", lastAck);
-            }
-            else {
-                printf("Window is full, packet ignored: %d\n", seqNum);
+                bzero(rcvBuf, sizeof(rcvBuf));
+                bzero(rcvContent, sizeof(rcvContent));
+                sigprocmask(SIG_UNBLOCK, signal_set, NULL);
+                free(signal_set);
+                unlock(4);
             }
         }
         else {
-            printf("- producer dropping packet.\n");    
+            //poll error
+            printf("Poll error: %d\n", res);
         }
-
-        bzero(rcvBuf, sizeof(rcvBuf));
-        bzero(rcvContent, sizeof(rcvContent));
-        sigprocmask(SIG_UNBLOCK, signal_set, NULL);
-        free(signal_set);
-        unlock(4);
     }
 
     unlock(4);
@@ -297,7 +337,7 @@ void recieveFile(int socketFd, float dProb, int isLocal) {
     }
 
     if(nrecv < 0) {
-        perror("error receiving across network!\n");
+        perror("error in recv, aborting");
         exit(1);
     }
 }
@@ -306,19 +346,20 @@ void recieveFile(int socketFd, float dProb, int isLocal) {
 
 static void * runConsumerThread(void *arg) {
     Pthread_detach(pthread_self());
-    FILE *outputFile = fopen("output.txt", "w");
+    //FILE *outputFile = fopen("output.txt", "w");
 
     for(;;) {
         block(2);
 
         int sizeBeforeRead = availWindoSize(window);
-        readFromWindow(window, window->numberCells, outputFile);
+        //readFromWindow(window, window->numberCells, outputFile);
+        readFromWindow(window, window->numberCells, NULL);
         printWindow(window);
         int size = availWindoSize(window);
         
         if(size == window->numberCells && recievedEOF == 1) {
-            printf("Closing outputFile\nTerminating Consumer thread");
-            fclose(outputFile);
+            //printf("Closing outputFile\nTerminating Consumer thread");
+            //fclose(outputFile);
             finished = 1;
             break;   
         }
@@ -398,10 +439,14 @@ int main(int argc, char **argv) {
     
     close(fd);
     
-    int isLocal = checkIfSameNode(serverIp, clientIp);
+    isLocal = checkIfSameNode(serverIp, clientIp);
     int socketFd = createSocket(isLocal, clientIp, serverIp, port);
 
-    sendFirstHandshake(socketFd, isLocal, filename, windowSize);
+    initSocketFd = socketFd;
+    initFilename = filename;
+    initWindowSize = windowSize;
+
+    sendFirstHandshake();
     window = makeWindow(windowSize);
     spawnConsumerThread();
     recieveFile(socketFd, prob, isLocal);

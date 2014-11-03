@@ -9,10 +9,67 @@
 #include "shared.h"
 #include "serverChild.h"
 
-#pragma mark - Main
-
 extern struct ifi_info *get_ifi_info_plus(int family, int doaliases);
 extern        void      free_ifi_info_plus(struct ifi_info *ifihead);
+
+#pragma mark - Children
+
+typedef struct {
+    char clientAdr[MAXLINE];
+    int process;
+} ClientChild;
+
+static ClientChild children[20];
+
+void setup() {
+    int i;
+    for(i=0; i<20; i++)
+        children[i].process = -1;
+}
+
+int doesChildExist(char *ip) {
+    int i;
+    for(i=0; i<20; i++) {
+        printf("strcmp(%s, %s): %d\n", ip, children[i].clientAdr, strcmp(ip, children[i].clientAdr));
+        if(strcmp(ip, children[i].clientAdr) == 0)
+            return i;
+    }
+    return -1;
+}
+
+int insertChild(char *ip, int pId) {
+    int i;
+    for(i=0; i<20; i++) {
+        if(children[i].process == -1) {
+            bzero(children[i].clientAdr, sizeof(children[i].clientAdr));
+            strcpy(children[i].clientAdr, ip);
+            children[i].process = pId;
+
+            printf("Inserted child with ip: %s, process: %d at index: %d\n", children[i].clientAdr, children[i].process, i);
+            return i;
+        }
+    }
+    return -1;
+}
+
+void removeChild(int index) {
+    children[index].process = -1;
+    bzero(children[index].clientAdr, sizeof(children[index].clientAdr));
+}
+
+void forkChild(char *cliIp, int cliPort, SocketInfo *si, SocketInfo *socketInfo, struct sockaddr_in cliaddr, socklen_t clilen, char* filename, int windowSize) {
+    int childpid;
+    if((childpid = Fork()) == 0) {
+        //child
+        handleClient(cliIp, cliPort, si, socketInfo, cliaddr, clilen, filename, windowSize);
+        printf("Child exiting\n");
+        exit(0);
+    }
+    else {
+        //parent
+        insertChild(cliIp, childpid);
+    }
+}
 
 SocketInfo* createListeningSockets(int port, int windowSize) {
     struct ifi_info *ifi, *ifihead;
@@ -95,12 +152,18 @@ SocketInfo* createListeningSockets(int port, int windowSize) {
                     filename = mesg;
                     printf("Server has file: %s\n", filename);
                     
-                    int childpid;
-                    if((childpid = Fork()) == 0) {
-                        //child - call some other .c method
-                        handleClient(cliIp, cliPort, si, socketInfo, cliaddr, clilen, filename, windowSize);
-                        printf("Child exiting\n");
-                        exit(0);
+                    int childIndex = doesChildExist(cliIp);
+                    printf("ChildIndex: %d\n", childIndex);
+                    if(childIndex == -1) {
+                        forkChild(cliIp, cliPort, si, socketInfo, cliaddr, clilen, filename, windowSize);
+                    }
+                    else {
+                        printf("Recieved first handshake again - killing child and re creating new one for handle\n");
+                        ClientChild child = children[childIndex];
+                        kill(child.process,SIGKILL);
+                        removeChild(childIndex);
+
+                        forkChild(cliIp, cliPort, si, socketInfo, cliaddr, clilen, filename, windowSize);
                     }
                 }
             }
@@ -111,6 +174,7 @@ SocketInfo* createListeningSockets(int port, int windowSize) {
 }
 
 int main(int argc, char **argv) {
+    setup();
     char line[MAXLINE];
     
     int fd = open("server.in", O_RDONLY);

@@ -77,7 +77,6 @@ int availWindoSize(Window *window) {
     WindowCell *ptr = window->ptr;
     int index = indexOfCell(window, ptr);
     int windowSize = 0;
-    printf("ptr seqNum: %d\n", firstSeqNum);
 
     //for a full buffer
     if(ptr->arrived) 
@@ -105,7 +104,7 @@ void readFromWindow(Window *window, int numCells, FILE *outputFile) {
 
         if(ptr->arrived) {
             printf("\nReading datagram from window w/ SeqNum: %d\nData: %s\n\n", ptr->seqNum, ptr->data);
-            fputs(ptr->data, outputFile);
+            //fputs(ptr->data, outputFile);
             ptr->arrived = 0;
             ptr->seqNum = newSeqNum;
             bzero(ptr->data, sizeof(ptr->data));
@@ -113,7 +112,7 @@ void readFromWindow(Window *window, int numCells, FILE *outputFile) {
 
             //handle full buffer - new slot avail so move ptr
             if(window->ptr->arrived) {
-                if(ptr->seqNum == window->ptr->seqNum+1) {
+                if(ptr->seqNum == window->ptr->seqNum+1) { 
                     window->ptr = ptr;
                 }
             }
